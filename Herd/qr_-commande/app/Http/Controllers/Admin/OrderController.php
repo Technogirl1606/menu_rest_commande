@@ -5,10 +5,13 @@ namespace App\Http\Controllers\Admin;
 use App\OrderStatus;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
+use Carbon\CarbonImmutable as Carbon;
+use Illuminate\Http\Request;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
+
 
 class OrderController extends Controller
 {
@@ -42,24 +45,25 @@ class OrderController extends Controller
 
         return Inertia::render('Admin/Orders/Index', [
             'orders' => $orders,
-            'stats' => $this->todayStats(),
+            'stats' => $this->statsForDate(today()),
         ]);
     }
 
     /**
-     * Statistiques du jour, pour le bandeau en haut de l'écran cuisine.
+     * Statistiques pour UNE journée donnée (utilisée par l'écran cuisine avec
+     * "aujourd'hui", et par l'historique avec la date choisie par l'admin).
      * On exclut les commandes annulées de tous ces calculs.
      */
-    private function todayStats(): array
+    private function statsForDate(Carbon $date): array
     {
-        $todayOrders = Order::query()
-            ->whereDate('created_at', today())
+        $dayOrders = Order::query()
+            ->whereDate('created_at', $date)
             ->where('status', '!=', OrderStatus::Annulee->value)
             ->get();
 
         $topItem = DB::table('order_items')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
-            ->whereDate('orders.created_at', today())
+            ->whereDate('orders.created_at', $date)
             ->where('orders.status', '!=', OrderStatus::Annulee->value)
             ->select('order_items.name', DB::raw('SUM(order_items.quantite) as qty'))
             ->groupBy('order_items.name')
@@ -70,14 +74,14 @@ class OrderController extends Controller
         // commande) comme heure de service. Fiable tant que rien d'autre
         // que le changement de statut ne modifie la commande après coup.
         $avgPrepMinutes = Order::query()
-            ->whereDate('created_at', today())
+            ->whereDate('created_at', $date)
             ->where('status', OrderStatus::Servie->value)
             ->get()
             ->avg(fn (Order $o) => $o->created_at->diffInMinutes($o->updated_at));
 
         return [
-            'orders_count_today' => $todayOrders->count(),
-            'revenue_today' => (float) $todayOrders->sum('total'),
+            'orders_count' => $dayOrders->count(),
+            'revenue' => (float) $dayOrders->sum('total'),
             'top_item_name' => $topItem->name ?? null,
             'top_item_qty' => $topItem->qty ?? 0,
             'avg_prep_minutes' => $avgPrepMinutes ? round($avgPrepMinutes) : null,
@@ -100,16 +104,19 @@ class OrderController extends Controller
     }
 
     /**
-     * Historique : toutes les commandes, peu importe leur statut,
-     * les plus récentes en premier. Volontairement simple pour l'instant
-     * (50 dernières, pas de pagination) — à enrichir plus tard si besoin.
+     * Historique : les commandes d'UNE journée précise (aujourd'hui par défaut),
+     * avec les mêmes statistiques que la cuisine mais pour ce jour-là.
      */
-    public function history(): Response
+    public function history(Request $request): Response
     {
+        $date = $request->query('date')
+            ? Carbon::parse($request->query('date'))
+            : today();
+
         $orders = Order::query()
             ->with('items')
+            ->whereDate('created_at', $date)
             ->latest()
-            ->limit(50)
             ->get()
             ->map(fn (Order $order) => [
                 'id' => $order->id,
@@ -127,6 +134,8 @@ class OrderController extends Controller
 
         return Inertia::render('Admin/Orders/History', [
             'orders' => $orders,
+            'stats' => $this->statsForDate($date),
+            'date' => $date->format('Y-m-d'),
         ]);
     }
 }

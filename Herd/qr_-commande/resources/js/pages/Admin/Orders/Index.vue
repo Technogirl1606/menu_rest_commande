@@ -18,8 +18,8 @@ interface OrderRow {
 }
 
 interface DailyStats {
-  orders_count_today: number
-  revenue_today: number
+  orders_count: number
+  revenue: number
   top_item_name: string | null
   top_item_qty: number
   avg_prep_minutes: number | null
@@ -96,7 +96,7 @@ onMounted(() => {
   tickTimer = setInterval(() => tick.value++, 30_000)
 
   pollTimer = setInterval(() => {
-    router.reload({ only: ['orders', 'stats'], preserveScroll: true, preserveState: true })
+    router.reload({ only: ['orders', 'stats'], preserveUrl: true })
   }, 5_000)
 })
 
@@ -165,11 +165,11 @@ const columns = computed(() => [
         <div class="text-[11px] text-gray-400 mt-0.5">Commandes actives</div>
       </div>
       <div class="border border-gray-200 rounded-lg p-3">
-        <div class="text-xl font-bold">{{ stats.orders_count_today }}</div>
+        <div class="text-xl font-bold">{{ stats.orders_count }}</div>
         <div class="text-[11px] text-gray-400 mt-0.5">Commandes aujourd'hui</div>
       </div>
       <div class="border border-gray-200 rounded-lg p-3">
-        <div class="text-xl font-bold">{{ fmt(stats.revenue_today) }}</div>
+        <div class="text-xl font-bold">{{ fmt(stats.revenue) }}</div>
         <div class="text-[11px] text-gray-400 mt-0.5">Chiffre d'affaires du jour</div>
       </div>
       <div class="border border-gray-200 rounded-lg p-3">
