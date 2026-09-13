@@ -63,7 +63,6 @@ const note = ref('')
 const step = ref<'review' | 'confirm'>('review')
 const submitting = ref(false)
 const errorMsg = ref('')
-const orderNumber = ref<string | null>(null)
 
 const filteredItems = computed<MenuItem[]>(() =>
   props.items.filter(i => i.category_id === activeCategory.value)
@@ -104,11 +103,16 @@ function openCart(): void {
   cartOpen.value = true
 }
 
-// --- Suivi de la commande après validation ---
-const orderId = ref<number | null>(null)
-const orderTotal = ref<number>(0)
-const trackedStatus = ref<string>('nouvelle')
-let statusTimer: ReturnType<typeof setInterval> | undefined
+// --- Suivi de PLUSIEURS commandes en parallèle après validation ---
+interface TrackedOrder {
+  id: number
+  number: string
+  total: number
+  status: string
+}
+
+const activeOrders = ref<TrackedOrder[]>([])
+let pollTimer: ReturnType<typeof setInterval> | undefined
 
 const STATUS_STEPS = [
   { key: 'nouvelle', label: 'Envoyée' },
@@ -117,34 +121,56 @@ const STATUS_STEPS = [
   { key: 'servie', label: 'Servie' },
 ]
 
-const currentStepIndex = computed(() =>
-  STATUS_STEPS.findIndex(s => s.key === trackedStatus.value)
+function stepIndexFor(status: string): number {
+  return STATUS_STEPS.findIndex(s => s.key === status)
+}
+
+function labelFor(status: string): string {
+  return STATUS_STEPS.find(s => s.key === status)?.label ?? status
+}
+
+// Commandes pas encore terminées (ni servies, ni annulées) : celles qu'on continue à sonder.
+const pendingOrders = computed(() =>
+  activeOrders.value.filter(o => o.status !== 'servie' && o.status !== 'annulee')
 )
 
-function startTrackingOrder(id: number): void {
-  orderId.value = id
-  trackedStatus.value = 'nouvelle'
-  stopTrackingOrder() // au cas où un suivi précédent tournerait encore
+function openTracking(): void {
+  step.value = 'confirm'
+  cartOpen.value = true
+}
 
-  statusTimer = setInterval(async () => {
-    try {
-      const { data } = await axios.get(`/orders/${id}/status`)
-      trackedStatus.value = data.status
-      if (data.status === 'servie' || data.status === 'annulee') {
-        stopTrackingOrder()
+function ensurePolling(): void {
+  if (pollTimer) return // déjà en cours, pas besoin d'en relancer un second
+
+  pollTimer = setInterval(async () => {
+    for (const order of activeOrders.value) {
+      if (order.status === 'servie' || order.status === 'annulee') continue
+      try {
+        const { data } = await axios.get(`/orders/${order.id}/status`)
+        order.status = data.status
+      } catch (e) {
+        // Silencieux : un raté ponctuel de sondage n'a pas besoin d'interrompre l'affichage.
       }
-    } catch (e) {
-      // Silencieux : un raté ponctuel de sondage n'a pas besoin d'interrompre l'affichage.
     }
   }, 5000)
 }
 
-function stopTrackingOrder(): void {
-  if (statusTimer) clearInterval(statusTimer)
-  statusTimer = undefined
+function stopPollingIfNothingToTrack(): void {
+  if (pendingOrders.value.length === 0 && pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = undefined
+  }
 }
 
-onUnmounted(() => stopTrackingOrder())
+// Retire une commande terminée de la liste affichée (le client "range" sa commande servie).
+function dismissOrder(id: number): void {
+  activeOrders.value = activeOrders.value.filter(o => o.id !== id)
+  stopPollingIfNothingToTrack()
+}
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
 
 async function confirmOrder(): Promise<void> {
   errorMsg.value = ''
@@ -160,10 +186,21 @@ async function confirmOrder(): Promise<void> {
         quantite: l.quantite,
       })),
     })
-    orderNumber.value = data.order.number
-    orderTotal.value = data.order.total
+
+    activeOrders.value.push({
+      id: data.order.id,
+      number: data.order.number,
+      total: data.order.total,
+      status: 'nouvelle',
+    })
+    ensurePolling()
+
     step.value = 'confirm'
-    startTrackingOrder(data.order.id)
+
+    // La commande est enregistrée en base : le panier en mémoire n'a plus
+    // besoin d'exister. On le vide pour permettre d'en composer une nouvelle
+    // tout de suite, sans perdre le suivi de celle qu'on vient de passer.
+    Object.keys(cart).forEach(k => delete cart[Number(k)])
   } catch (e) {
     errorMsg.value = "Impossible d'envoyer la commande. Réessaie."
   } finally {
@@ -172,11 +209,9 @@ async function confirmOrder(): Promise<void> {
 }
 
 function newOrder(): void {
-  Object.keys(cart).forEach(k => delete cart[Number(k)])
   tableLabel.value = props.table?.name ?? ''
   note.value = ''
   cartOpen.value = false
-  stopTrackingOrder()
 }
 </script>
 
@@ -267,9 +302,34 @@ function newOrder(): void {
       </div>
     </div>
 
+    <!-- TRACKING BAR : prioritaire, reste accessible même si le client
+         ferme la modale par erreur en touchant à côté -->
+    <button
+      v-if="activeOrders.length > 0"
+      type="button"
+      @click="openTracking"
+      class="fixed left-4 right-4 bottom-4 max-w-md mx-auto bg-gray-900 text-white rounded-2xl px-5 py-4 flex items-center gap-3 justify-between shadow-xl"
+    >
+      <div class="flex items-center gap-3">
+        <span class="h-2.5 w-2.5 rounded-full bg-green-400 animate-pulse shrink-0"></span>
+        <span class="text-left">
+          <span v-if="activeOrders.length === 1" class="block font-bold text-sm">
+            Commande {{ activeOrders[0].number }}
+          </span>
+          <span v-else class="block font-bold text-sm">
+            {{ activeOrders.length }} commandes
+          </span>
+          <span class="block text-gray-300 text-xs">
+            {{ pendingOrders.length > 0 ? `${pendingOrders.length} en cours` : 'Toutes servies' }} · Voir le suivi
+          </span>
+        </span>
+      </div>
+      <span class="text-lg">→</span>
+    </button>
+
     <!-- FLOATING CART BAR -->
     <button
-      v-if="cartCount > 0"
+      v-else-if="cartCount > 0"
       type="button"
       @click="openCart"
       class="fixed left-4 right-4 bottom-4 max-w-md mx-auto bg-red-600 text-white rounded-2xl px-5 py-4 flex items-center gap-3 justify-between shadow-xl"
@@ -356,60 +416,83 @@ function newOrder(): void {
         </template>
 
         <template v-else>
-          <div class="text-center py-4">
-            <div class="text-xs uppercase tracking-wide text-gray-400 font-bold">Commande envoyée</div>
-            <div class="text-4xl font-extrabold text-red-600 my-3">{{ orderNumber }}</div>
-
-            <div v-if="trackedStatus === 'annulee'" class="text-sm text-red-600 font-medium py-4">
-              Cette commande a été annulée.
+          <div class="text-center">
+            <div class="text-xs uppercase tracking-wide text-gray-400 font-bold mb-4">
+              Suivi de vos commandes
             </div>
 
-            <template v-else>
-              <!-- Jauge de progression -->
-              <div class="flex items-center justify-between mt-6 mb-2 px-2">
-                <template v-for="(s, i) in STATUS_STEPS" :key="s.key">
-                  <div class="flex flex-col items-center flex-1">
-                    <div
-                      :class="[
-                        'h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold border-2',
-                        i < currentStepIndex ? 'bg-red-600 border-red-600 text-white' :
-                        i === currentStepIndex ? 'bg-red-600 border-red-600 text-white animate-pulse' :
-                        'bg-white border-gray-200 text-gray-300'
-                      ]"
-                    >
-                      <span v-if="i < currentStepIndex">✓</span>
-                      <span v-else>{{ i + 1 }}</span>
-                    </div>
-                    <span :class="['text-[10px] mt-1.5 text-center leading-tight', i <= currentStepIndex ? 'text-gray-700 font-medium' : 'text-gray-300']">
-                      {{ s.label }}
-                    </span>
+            <div class="space-y-4 text-left">
+              <div
+                v-for="order in activeOrders" :key="order.id"
+                class="border border-gray-100 rounded-xl p-4"
+              >
+                <div class="flex items-center justify-between">
+                  <span class="font-mono font-bold text-lg text-red-600">{{ order.number }}</span>
+                  <button
+                    v-if="order.status === 'servie' || order.status === 'annulee'"
+                    type="button" @click="dismissOrder(order.id)"
+                    class="text-gray-300 hover:text-gray-500 text-sm"
+                    aria-label="Retirer cette commande de la liste"
+                  >✕</button>
+                </div>
+
+                <div v-if="order.status === 'annulee'" class="text-sm text-red-600 font-medium py-3">
+                  Cette commande a été annulée.
+                </div>
+
+                <template v-else>
+                  <!-- Jauge de progression, compacte -->
+                  <div class="flex items-center justify-between mt-4 mb-1 px-1">
+                    <template v-for="(s, i) in STATUS_STEPS" :key="s.key">
+                      <div class="flex flex-col items-center flex-1">
+                        <div
+                          :class="[
+                            'h-6 w-6 rounded-full flex items-center justify-center text-[10px] font-bold border-2',
+                            i < stepIndexFor(order.status) ? 'bg-red-600 border-red-600 text-white' :
+                            i === stepIndexFor(order.status) ? 'bg-red-600 border-red-600 text-white animate-pulse' :
+                            'bg-white border-gray-200 text-gray-300'
+                          ]"
+                        >
+                          <span v-if="i < stepIndexFor(order.status)">✓</span>
+                          <span v-else>{{ i + 1 }}</span>
+                        </div>
+                        <span :class="['text-[9px] mt-1 text-center leading-tight', i <= stepIndexFor(order.status) ? 'text-gray-700 font-medium' : 'text-gray-300']">
+                          {{ s.label }}
+                        </span>
+                      </div>
+                      <div
+                        v-if="i < STATUS_STEPS.length - 1"
+                        :class="['h-0.5 flex-1 -mt-4', i < stepIndexFor(order.status) ? 'bg-red-600' : 'bg-gray-200']"
+                      ></div>
+                    </template>
                   </div>
-                  <div
-                    v-if="i < STATUS_STEPS.length - 1"
-                    :class="['h-0.5 flex-1 -mt-5', i < currentStepIndex ? 'bg-red-600' : 'bg-gray-200']"
-                  ></div>
+
+                  <div v-if="order.status === 'servie'" class="bg-gray-50 rounded-lg py-2.5 px-3 mt-3 flex items-center justify-between">
+                    <span class="text-xs text-gray-500">Bon appétit ! Total</span>
+                    <span class="font-bold text-red-600">{{ fmt(order.total) }}</span>
+                  </div>
+                  <p v-else class="text-xs text-gray-400 mt-3">
+                    {{ labelFor(order.status) }} — mise à jour automatique
+                  </p>
                 </template>
               </div>
-
-              <p class="text-sm text-gray-600 mt-4">
-                {{
-                  trackedStatus === 'servie'
-                    ? 'Bon appétit ! 🎉'
-                    : 'La cuisine a été notifiée. Cette page se met à jour automatiquement.'
-                }}
-              </p>
-
-              <div v-if="trackedStatus === 'servie'" class="bg-gray-50 rounded-lg py-3 px-4 mt-3 flex items-center justify-between">
-                <span class="text-sm text-gray-500">Total à régler</span>
-                <span class="font-bold text-lg text-red-600">{{ fmt(orderTotal) }}</span>
-              </div>
-            </template>
+            </div>
 
             <button
-              type="button" @click="newOrder"
+              v-if="cartCount > 0"
+              type="button" @click="step = 'review'"
               class="w-full mt-5 bg-red-600 text-white font-bold py-3.5 rounded-lg"
             >
-              Nouvelle commande
+              Voir mon panier ({{ cartCount }})
+            </button>
+            <button
+              type="button" @click="newOrder"
+              :class="[
+                'w-full mt-2 font-semibold py-3 rounded-lg text-sm',
+                cartCount > 0 ? 'border border-gray-200 text-gray-600' : 'bg-red-600 text-white font-bold py-3.5'
+              ]"
+            >
+              {{ cartCount > 0 ? 'Fermer' : 'Commander autre chose' }}
             </button>
           </div>
         </template>
