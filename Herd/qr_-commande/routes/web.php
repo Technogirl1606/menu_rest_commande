@@ -8,8 +8,7 @@ use App\Http\Controllers\Admin\CategoryController;
 use App\Http\Controllers\Admin\OrderController as KitchenController;
 use App\Http\Controllers\Admin\TableController;
 
-
-Route::inertia('/', 'Welcome')->name('home');
+Route::redirect('/', '/menu')->name('home');
 
 Route::middleware(['auth', 'verified'])->get('/dashboard', function () {
     return redirect()->route('admin.items.index');
@@ -43,7 +42,6 @@ Route::middleware(['auth', 'verified'])->prefix('admin')->name('admin.')->group(
     Route::get('/tables/create', [TableController::class, 'create'])->name('tables.create');
     Route::post('/tables', [TableController::class, 'store'])->name('tables.store');
     Route::delete('/tables/{table}', [TableController::class, 'destroy'])->name('tables.destroy');
-
 });
-Route::get('/orders/{order}/status', [OrderController::class, 'status'])->name('orders.status');
+
 require __DIR__.'/settings.php';
